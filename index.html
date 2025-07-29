@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#6366f1">
+    <title>Omnivue - Multi-Camera Recorder</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <header class="header">
+            <div class="header-content">
+                <h1 class="app-title">
+                    <span class="title-icon">📹</span>
+                    Omnivue
+                </h1>
+                <p class="app-subtitle">Multi-Camera Recording Studio</p>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <div class="controls-section">
+                <button id="scan-cameras" class="primary-button">
+                    <span class="button-icon">🔍</span>
+                    Scan Cameras
+                </button>
+                <div id="camera-count" class="camera-count">
+                    No cameras detected
+                </div>
+            </div>
+
+            <div id="cameras-container" class="cameras-container">
+                <!-- Camera cards will be dynamically inserted here -->
+            </div>
+
+            <div id="no-cameras" class="no-cameras">
+                <div class="no-cameras-icon">📷</div>
+                <h3>No Cameras Found</h3>
+                <p>Click "Scan Cameras" to detect available camera devices</p>
+            </div>
+        </main>
+
+        <div id="loading" class="loading-overlay">
+            <div class="loading-spinner"></div>
+            <p>Accessing cameras...</p>
+        </div>
+
+        <div id="error-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>⚠️ Camera Access Error</h3>
+                    <button id="close-error" class="close-button">×</button>
+                </div>
+                <div class="modal-body">
+                    <p id="error-message">Unable to access camera devices.</p>
+                    <div class="error-suggestions">
+                        <h4>Try these solutions:</h4>
+                        <ul>
+                            <li>Allow camera permissions in your browser</li>
+                            <li>Ensure you're using HTTPS or localhost</li>
+                            <li>Check if another app is using the camera</li>
+                            <li>Refresh the page and try again</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
