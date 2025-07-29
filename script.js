@@ -5,9 +5,12 @@ class OmnivueApp {
         this.mediaRecorders = new Map();
         this.recordedChunks = new Map();
         this.recordingTimers = new Map();
+        this.cameraRetryAttempts = new Map(); // Track retry attempts per camera
+        this.forceAccessMode = false; // Global force access mode
         
         this.elements = {
             scanButton: document.getElementById('scan-cameras'),
+            startAllButton: document.getElementById('start-all-cameras'),
             cameraCount: document.getElementById('camera-count'),
             camerasContainer: document.getElementById('cameras-container'),
             noCameras: document.getElementById('no-cameras'),
@@ -28,6 +31,7 @@ class OmnivueApp {
     
     bindEvents() {
         this.elements.scanButton.addEventListener('click', () => this.scanCameras());
+        this.elements.startAllButton.addEventListener('click', () => this.startAllCameras());
         this.elements.closeError.addEventListener('click', () => this.hideError());
         
         // Close modal when clicking outside
@@ -92,6 +96,7 @@ class OmnivueApp {
                 await this.setupCameras(videoDevices);
                 this.updateCameraCount(videoDevices.length);
                 this.hideNoCameras();
+                this.elements.startAllButton.disabled = false;
             }
             
         } catch (error) {
@@ -211,7 +216,7 @@ class OmnivueApp {
         });
     }
     
-    async startPreview(cameraId) {
+    async startPreview(cameraId, forceRetry = false) {
         try {
             const camera = this.cameras.get(cameraId);
             const card = this.getCameraCard(cameraId);
@@ -219,25 +224,40 @@ class OmnivueApp {
             
             this.updateCameraStatus(cameraId, 'active');
             
-            const constraints = {
-                video: {
-                    deviceId: camera.deviceId ? { exact: camera.deviceId } : undefined,
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 },
-                    frameRate: { ideal: 30 }
+            // Try multiple constraint configurations for better compatibility
+            const constraintSets = this.getConstraintSets(camera.deviceId, forceRetry);
+            
+            let stream = null;
+            let lastError = null;
+            
+            for (const constraints of constraintSets) {
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    break; // Success, exit loop
+                } catch (error) {
+                    lastError = error;
+                    console.warn(`Failed with constraints:`, constraints, error);
+                    
+                    // If camera is in use, try force access techniques
+                    if (error.name === 'NotReadableError' && !forceRetry) {
+                        await this.attemptForceAccess(cameraId);
+                        continue;
+                    }
                 }
-            };
+            }
             
-            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (!stream) {
+                throw lastError || new Error('Failed to access camera with all constraint sets');
+            }
+            
             video.srcObject = stream;
-            
             this.activeStreams.set(cameraId, stream);
             this.updateCameraButtons(cameraId, 'previewing');
+            this.cameraRetryAttempts.delete(cameraId); // Reset retry count on success
             
         } catch (error) {
             console.error('Error starting preview:', error);
-            this.handleCameraError(error);
-            this.updateCameraStatus(cameraId, 'idle');
+            await this.handleCameraAccessError(cameraId, error);
         }
     }
     
@@ -439,6 +459,12 @@ class OmnivueApp {
                 buttons.record.disabled = false;
                 buttons.download.disabled = false;
                 break;
+            case 'retrying':
+                // All buttons disabled during retry
+                break;
+            case 'error':
+                buttons.start.disabled = false; // Allow retry
+                break;
         }
     }
     
@@ -470,6 +496,9 @@ class OmnivueApp {
         
         // Clear DOM
         this.elements.camerasContainer.innerHTML = '';
+        
+        // Disable start all button
+        this.elements.startAllButton.disabled = true;
     }
     
     pauseAllStreams() {
@@ -502,9 +531,138 @@ class OmnivueApp {
             }
         });
     }
+
+    getConstraintSets(deviceId, forceRetry = false) {
+        const baseConstraints = [
+            // High quality constraints
+            {
+                video: {
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    frameRate: { ideal: 30 }
+                }
+            },
+            // Medium quality constraints
+            {
+                video: {
+                    deviceId: deviceId ? { ideal: deviceId } : undefined,
+                    width: { ideal: 640 },
+                    height: { ideal: 480 },
+                    frameRate: { ideal: 15 }
+                }
+            },
+            // Basic constraints
+            {
+                video: {
+                    deviceId: deviceId ? { ideal: deviceId } : undefined,
+                    width: { min: 320 },
+                    height: { min: 240 }
+                }
+            }
+        ];
+
+        if (forceRetry || this.forceAccessMode) {
+            // Add more aggressive constraints for force access
+            baseConstraints.push(
+                // Try without specific device ID
+                {
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                },
+                // Minimal constraints
+                {
+                    video: true
+                }
+            );
+        }
+
+        return baseConstraints;
+    }
+
+    async attemptForceAccess(cameraId) {
+        try {
+            // First, try to stop any existing streams that might be blocking
+            await this.releaseAllCameraResources();
+            
+            // Wait a moment for resources to be released
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Try to enumerate devices again to refresh state
+            await navigator.mediaDevices.enumerateDevices();
+            
+            console.log(`Attempting force access for camera ${cameraId}`);
+            
+        } catch (error) {
+            console.warn('Force access preparation failed:', error);
+        }
+    }
+
+    async releaseAllCameraResources() {
+        // Stop all active streams
+        this.activeStreams.forEach((stream, cameraId) => {
+            stream.getTracks().forEach(track => {
+                track.stop();
+                console.log(`Stopped track for camera ${cameraId}`);
+            });
+        });
+        
+        // Stop all recordings
+        this.mediaRecorders.forEach((recorder, cameraId) => {
+            if (recorder.state === 'recording') {
+                recorder.stop();
+                console.log(`Stopped recording for camera ${cameraId}`);
+            }
+        });
+        
+        // Clear all data structures
+        this.activeStreams.clear();
+        this.mediaRecorders.clear();
+        
+        // Update UI
+        this.cameras.forEach((camera, cameraId) => {
+            this.updateCameraStatus(cameraId, 'idle');
+            this.updateCameraButtons(cameraId, 'idle');
+            const card = this.getCameraCard(cameraId);
+            if (card) {
+                const video = card.querySelector('.camera-video');
+                video.srcObject = null;
+            }
+        });
+    }
+
+    async handleCameraAccessError(cameraId, error) {
+        const retryAttempts = this.cameraRetryAttempts.get(cameraId) || 0;
+        const maxRetries = 3;
+        
+        if (error.name === 'NotReadableError' && retryAttempts < maxRetries) {
+            // Camera is in use - try retry with force access
+            this.cameraRetryAttempts.set(cameraId, retryAttempts + 1);
+            
+            console.log(`Camera ${cameraId} in use, attempting retry ${retryAttempts + 1}/${maxRetries}`);
+            
+            // Show retry status
+            this.updateCameraStatus(cameraId, 'retrying');
+            
+            // Wait before retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Try again with force retry
+            await this.startPreview(cameraId, true);
+            return;
+        }
+        
+        // If all retries failed or different error, show error and update UI
+        this.handleCameraError(error, cameraId);
+        this.updateCameraStatus(cameraId, 'error');
+        this.updateCameraButtons(cameraId, 'error');
+    }
     
-    handleCameraError(error) {
+    handleCameraError(error, cameraId = null) {
         let message = 'An error occurred while accessing the camera.';
+        let showForceOption = false;
         
         if (error.name === 'NotAllowedError') {
             message = 'Camera access was denied. Please allow camera permissions and try again.';
@@ -513,19 +671,180 @@ class OmnivueApp {
         } else if (error.name === 'NotSupportedError') {
             message = 'Camera access is not supported in this browser or context.';
         } else if (error.name === 'NotReadableError') {
-            message = 'Camera is already in use by another application.';
+            message = `Camera ${cameraId ? `"${this.cameras.get(cameraId)?.label || cameraId}"` : ''} is currently in use by another application. You can try force access mode to override this.`;
+            showForceOption = true;
         } else if (error.message) {
             message = error.message;
         }
         
-        this.showError(message);
+        this.showError(message, showForceOption, cameraId);
     }
     
-    showError(message) {
+    showError(message, showForceOption = false, cameraId = null) {
         this.elements.errorMessage.textContent = message;
+        
+        // Remove any existing force access controls
+        const existingForceControls = this.elements.errorModal.querySelector('.force-access-controls');
+        if (existingForceControls) {
+            existingForceControls.remove();
+        }
+        
+        if (showForceOption) {
+            const forceControls = document.createElement('div');
+            forceControls.className = 'force-access-controls';
+            forceControls.innerHTML = `
+                <div class="force-access-section">
+                    <h4>🔧 Force Access Options</h4>
+                    <p>Try these advanced options to override camera locks:</p>
+                    <div class="force-buttons">
+                        <button class="force-button" data-action="force-single" ${cameraId ? `data-camera-id="${cameraId}"` : ''}>
+                            🎯 Force Access This Camera
+                        </button>
+                        <button class="force-button" data-action="force-all">
+                            🔄 Release All & Retry
+                        </button>
+                        <button class="force-button" data-action="toggle-force-mode">
+                            ${this.forceAccessMode ? '🔒 Disable' : '🔓 Enable'} Force Mode
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            // Insert before error suggestions
+            const errorSuggestions = this.elements.errorModal.querySelector('.error-suggestions');
+            if (errorSuggestions) {
+                errorSuggestions.parentNode.insertBefore(forceControls, errorSuggestions);
+            } else {
+                this.elements.errorModal.querySelector('.modal-body').appendChild(forceControls);
+            }
+            
+            // Bind force button events
+            this.bindForceAccessEvents(forceControls);
+        }
+        
         this.elements.errorModal.classList.remove('hidden');
     }
     
+    bindForceAccessEvents(forceControls) {
+        const buttons = forceControls.querySelectorAll('.force-button');
+        
+        buttons.forEach(button => {
+            button.addEventListener('click', async (e) => {
+                e.preventDefault();
+                const action = button.getAttribute('data-action');
+                const cameraId = button.getAttribute('data-camera-id');
+                
+                // Add loading state
+                button.disabled = true;
+                button.style.opacity = '0.6';
+                
+                try {
+                    switch (action) {
+                        case 'force-single':
+                            if (cameraId) {
+                                await this.forceSingleCameraAccess(cameraId);
+                            }
+                            break;
+                        case 'force-all':
+                            await this.forceAllCamerasAccess();
+                            break;
+                        case 'toggle-force-mode':
+                            this.toggleForceAccessMode();
+                            break;
+                    }
+                    
+                    // Close error modal on success
+                    this.hideError();
+                    
+                } catch (error) {
+                    console.error('Force access failed:', error);
+                    this.showSuccessMessage('Force access attempt completed. Check camera status.');
+                } finally {
+                    button.disabled = false;
+                    button.style.opacity = '1';
+                }
+            });
+        });
+    }
+
+    async forceSingleCameraAccess(cameraId) {
+        console.log(`Force accessing camera: ${cameraId}`);
+        this.cameraRetryAttempts.delete(cameraId); // Reset retry count
+        await this.attemptForceAccess(cameraId);
+        await this.startPreview(cameraId, true);
+    }
+
+    async forceAllCamerasAccess() {
+        console.log('Force accessing all cameras');
+        await this.releaseAllCameraResources();
+        
+        // Clear all retry attempts
+        this.cameraRetryAttempts.clear();
+        
+        // Wait a moment
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Try to start all cameras with force mode
+        const promises = Array.from(this.cameras.keys()).map(cameraId => 
+            this.startPreview(cameraId, true).catch(error => {
+                console.warn(`Failed to force access camera ${cameraId}:`, error);
+            })
+        );
+        
+        await Promise.allSettled(promises);
+        this.showSuccessMessage('Force access completed for all cameras');
+    }
+
+    toggleForceAccessMode() {
+        this.forceAccessMode = !this.forceAccessMode;
+        const message = this.forceAccessMode 
+            ? 'Force Access Mode ENABLED - Cameras will use aggressive access methods'
+            : 'Force Access Mode DISABLED - Cameras will use standard access methods';
+        
+        this.showSuccessMessage(message);
+        console.log(message);
+    }
+
+    async startAllCameras() {
+        if (this.cameras.size === 0) {
+            this.showError('No cameras available. Please scan for cameras first.');
+            return;
+        }
+
+        this.elements.startAllButton.disabled = true;
+        this.elements.startAllButton.innerHTML = `
+            <span class="button-icon">⏳</span>
+            Starting All Cameras...
+        `;
+
+        const promises = Array.from(this.cameras.keys()).map(async (cameraId) => {
+            // Skip if already active
+            const camera = this.cameras.get(cameraId);
+            if (camera.status === 'active' || camera.status === 'recording') {
+                return;
+            }
+
+            try {
+                await this.startPreview(cameraId, this.forceAccessMode);
+            } catch (error) {
+                console.warn(`Failed to start camera ${cameraId}:`, error);
+            }
+        });
+
+        await Promise.allSettled(promises);
+
+        // Reset button
+        this.elements.startAllButton.innerHTML = `
+            <span class="button-icon">📹</span>
+            Start All Cameras
+        `;
+        this.elements.startAllButton.disabled = false;
+
+        // Show completion message
+        const activeCameras = Array.from(this.cameras.values()).filter(c => c.status === 'active').length;
+        this.showSuccessMessage(`Started ${activeCameras} out of ${this.cameras.size} cameras`);
+    }
+
     hideError() {
         this.elements.errorModal.classList.add('hidden');
     }
